@@ -1,6 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
-import { env } from '../config/env';
-import { ChatMessage } from '../lib/supabaseClient';
+import { env } from '../config/env.js';
+import { ChatMessage } from '../lib/supabaseClient.js';
 
 // Instancia única del SDK de Google Gemini
 const ai = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });

@@ -8,9 +8,9 @@ import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
 import path from 'path';
-import { env } from './config/env';
-import { getRecentHistory, saveMessage } from './lib/supabaseClient';
-import { generateGeminiReply } from './services/geminiService';
+import { env } from './config/env.js';
+import { getRecentHistory, saveMessage } from './lib/supabaseClient.js';
+import { generateGeminiReply } from './services/geminiService.js';
 
 // Logger en nivel 'silent' para mantener la consola limpia y legible
 const logger = pino({ level: 'silent' });

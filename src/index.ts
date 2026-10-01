@@ -30,7 +30,7 @@ setInterval(() => {
  */
 async function startWhatsAppBot() {
   // Carpeta donde se guarda la sesión para que nunca tengas que reescanear el QR
-  const authPath = path.resolve(__dirname, '../auth_info_baileys');
+  const authPath = path.resolve(process.cwd(), 'auth_info_baileys');
   const { state, saveCreds } = await useMultiFileAuthState(authPath);
   const { version } = await fetchLatestBaileysVersion();
 
@@ -83,10 +83,8 @@ async function startWhatsAppBot() {
     }
   });
 
-  // Procesamiento de mensajes entrantes
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
+  // Procesamiento de mensajes entrantes (tanto 'notify' de otros como 'append' de ti mismo)
+  sock.ev.on('messages.upsert', async ({ messages }) => {
     for (const msg of messages) {
       try {
         await handleIncomingMessage(sock, msg);
@@ -99,11 +97,10 @@ async function startWhatsAppBot() {
 
 /**
  * Procesa cada mensaje entrante:
- * 1. Filtra mensajes no deseados, estados o mensajes propios del bot.
- * 2. Consulta el historial previo en Supabase para darle memoria.
- * 3. Solicita la respuesta a Gemini (@google/genai).
- * 4. Envía la respuesta por WhatsApp citando el mensaje.
- * 5. Guarda la interacción en Supabase.
+ * 1. Filtra mensajes del propio bot para evitar bucles.
+ * 2. Verifica si empieza con el comando (.ia).
+ * 3. Si no tiene el comando, ignora en silencio (protege chats normales).
+ * 4. Si tiene .ia, consulta a Gemini con memoria de Supabase y responde.
  */
 async function handleIncomingMessage(
   sock: ReturnType<typeof makeWASocket>,
@@ -114,40 +111,54 @@ async function handleIncomingMessage(
   const remoteJid = m.key.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
 
-  // Ignorar grupos por defecto para evitar respuestas no solicitadas
+  // Ignorar grupos por defecto
   if (remoteJid.endsWith('@g.us')) return;
 
   // Si el mensaje fue generado por el propio bot, ignorar para evitar bucles
   if (m.key.id && botMessageIds.has(m.key.id)) return;
 
-  // Si el mensaje es 'fromMe' (enviado desde este número):
-  // Solo responder si es el chat personal consigo mismo ("Mensajes guardados / Tú")
-  if (m.key.fromMe) {
-    const myPhone = sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0];
-    const targetPhone = remoteJid.split('@')[0];
-    if (myPhone !== targetPhone) {
-      // El usuario está chateando con otra persona desde su móvil; no intervenir
-      return;
-    }
-  }
-
-  // Extraer el texto del mensaje
-  const userText = (
-    m.message.conversation ||
-    m.message.extendedTextMessage?.text ||
-    m.message.imageMessage?.caption ||
-    m.message.videoMessage?.caption ||
+  // Extraer el texto del mensaje (soporta mensajes normales, temporales o con imagen)
+  const rawMessage = (m.message as any).ephemeralMessage?.message || m.message;
+  const rawText = (
+    rawMessage.conversation ||
+    rawMessage.extendedTextMessage?.text ||
+    rawMessage.imageMessage?.caption ||
+    rawMessage.videoMessage?.caption ||
     ''
   ).trim();
 
-  if (!userText) {
-    // Si no contiene texto (ej. solo audio, sticker o llamada), omitir
+  if (!rawText) return;
+
+  // Lista de comandos válidos para activar al bot
+  const PREFIXES = ['.ia', '!ia', '/ia', '.gemini'];
+  const matchedPrefix = PREFIXES.find((prefix) =>
+    rawText.toLowerCase().startsWith(prefix)
+  );
+
+  // 🛡️ SEGURIDAD TOTAL: Si no empieza con el comando, ignorar al 100%
+  // Tus conversaciones normales con amigos, familia o trabajo jamás serán respondidas
+  if (!matchedPrefix) {
+    console.log(`📩 [Mensaje recibido] "${rawText}" -> (Ignorado por seguridad, no contiene .ia)`);
+    return;
+  }
+
+  // Extraer la pregunta limpia retirando el comando
+  const cleanPrompt = rawText.slice(matchedPrefix.length).trim();
+
+  if (!cleanPrompt) {
+    await sock.sendMessage(
+      remoteJid,
+      {
+        text: '👋 ¡Hola! Para hacerme una consulta escribe *.ia* seguido de tu pregunta.\n\n_Ejemplo:_ `.ia explica la fotosíntesis en 2 oraciones`',
+      },
+      { quoted: m }
+    );
     return;
   }
 
   const senderNumber = remoteJid.split('@')[0];
   const senderName = m.pushName || senderNumber;
-  console.log(`\n📩 [Mensaje recibido] de ${senderName} (${senderNumber}): "${userText}"`);
+  console.log(`\n🤖 [Comando .ia activado] de ${senderName} (${senderNumber}): "${cleanPrompt}"`);
 
   try {
     // Marcar como leído y mostrar indicador de "escribiendo..."
@@ -158,7 +169,7 @@ async function handleIncomingMessage(
     const recentHistory = await getRecentHistory(senderNumber, env.MAX_HISTORY_MESSAGES);
 
     // 2. Generar respuesta con Google Gemini (@google/genai)
-    const geminiReply = await generateGeminiReply(userText, recentHistory);
+    const geminiReply = await generateGeminiReply(cleanPrompt, recentHistory);
 
     // 3. Enviar mensaje de vuelta en WhatsApp
     const sent = await sock.sendMessage(
@@ -176,7 +187,7 @@ async function handleIncomingMessage(
 
     // 4. Guardar mensaje del usuario y respuesta de la IA en Supabase
     await Promise.all([
-      saveMessage(senderNumber, 'user', userText),
+      saveMessage(senderNumber, 'user', cleanPrompt),
       saveMessage(senderNumber, 'model', geminiReply),
     ]);
 
